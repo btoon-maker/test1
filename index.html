@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Crash Test Energy Lesson</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a1a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Georgia', serif;
+  }
+  .title-bar {
+    color: #f0c040;
+    font-size: 15px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    font-weight: bold;
+  }
+  canvas {
+    border: 3px solid #333;
+    border-radius: 4px;
+    display: block;
+    box-shadow: 0 0 40px rgba(0,0,0,0.8);
+  }
+  .controls {
+    margin-top: 14px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+  button {
+    background: #f0c040;
+    color: #1a1a1a;
+    border: none;
+    padding: 8px 22px;
+    font-size: 13px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    border-radius: 3px;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: background 0.2s;
+  }
+  button:hover { background: #ffd84d; }
+  .label {
+    color: #888;
+    font-size: 12px;
+    letter-spacing: 1px;
+  }
+</style>
+</head>
+<body>
+<div class="title-bar">⚡ Energy in a Crash — Where Does It Go?</div>
+<canvas id="c" width="1100" height="480"></canvas>
+<div class="controls">
+  <button id="playBtn" onclick="restart()">▶ Play Again</button>
+  <span class="label">5th Grade Science · Kinetic Energy → Heat · Sound · Vibration</span>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// ── TIMING (seconds) ──────────────────────────────────────────────
+const T_IDLE    = 1.2;   // still at start
+const T_DRIVE   = 2.8;   // car drives to barrier
+const T_IMPACT  = 0.35;  // contact moment
+const T_HOLD    = 3.5;   // hold post-impact
+const T_TOTAL   = T_IDLE + T_DRIVE + T_IMPACT + T_HOLD;
+
+// ── POSITIONS ─────────────────────────────────────────────────────
+const BARRIER_X   = 870;  // left edge of barrier
+const CAR_W       = 380;
+const CAR_H       = 155;
+const CAR_START_X = 170;  // x = front of car
+const CAR_STOP_X  = BARRIER_X - 2; // front of car at barrier face
+const CAR_Y       = H - 145;
+
+// state
+let startTime = null;
+let animId    = null;
+let soundPlayed = false;
+
+// ── AUDIO CONTEXT (Web Audio crash thump) ─────────────────────────
+let audioCtx = null;
+function playImpactSound() {
+  if (soundPlayed) return;
+  soundPlayed = true;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // Low-frequency thump
+    const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.8, audioCtx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+      const t = i / audioCtx.sampleRate;
+      const env = Math.exp(-t * 9);
+      data[i] = env * (Math.random() * 2 - 1) * 0.8
+              + env * Math.sin(2 * Math.PI * 55 * t) * 0.6
+              + env * Math.sin(2 * Math.PI * 30 * t) * 0.4;
+    }
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    // distort slightly
+    const wave = audioCtx.createWaveShaper();
+    const curve = new Float32Array(256);
+    for (let i = 0; i < 256; i++) {
+      const x = (i * 2) / 256 - 1;
+      curve[i] = (Math.PI + 300) * x / (Math.PI + 300 * Math.abs(x));
+    }
+    wave.curve = curve;
+    src.connect(wave);
+    wave.connect(audioCtx.destination);
+    src.start();
+  } catch(e) {}
+}
+
+// ── EASING ────────────────────────────────────────────────────────
+function easeIn(t)  { return t * t * t; }
+function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+function lerp(a,b,t){ return a + (b - a) * t; }
+
+// ── PARTICLES ─────────────────────────────────────────────────────
+const particles = [];
+function spawnParticles(x, y, count) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI - Math.PI * 0.85;
+    const speed = 1.5 + Math.random() * 3.5;
+    particles.push({
+      x, y: y + (Math.random() - 0.5) * 30,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 1.5,
+      life: 1,
+      decay: 0.018 + Math.random() * 0.022,
+      size: 1.5 + Math.random() * 3,
+      type: Math.random() > 0.5 ? 'dust' : 'debris'
+    });
+  }
+}
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.vy += 0.12;
+    p.life -= p.decay;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+function drawParticles() {
+  particles.forEach(p => {
+    ctx.save();
+    ctx.globalAlpha = p.life * 0.7;
+    if (p.type === 'dust') {
+      ctx.fillStyle = '#b8a090';
+    } else {
+      ctx.fillStyle = '#888';
+    }
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  });
+}
+
+// ── DRAW BACKGROUND LAB ──────────────────────────────────────────
+function drawLab() {
+  // Ceiling / walls gradient
+  const wallGrad = ctx.createLinearGradient(0, 0, 0, H * 0.55);
+  wallGrad.addColorStop(0, '#4a5060');
+  wallGrad.addColorStop(1, '#6a7080');
+  ctx.fillStyle = wallGrad;
+  ctx.fillRect(0, 0, W, H * 0.58);
+
+  // Floor
+  const floorGrad = ctx.createLinearGradient(0, H * 0.55, 0, H);
+  floorGrad.addColorStop(0, '#9aa0a8');
+  floorGrad.addColorStop(1, '#7a8088');
+  ctx.fillStyle = floorGrad;
+  ctx.fillRect(0, H * 0.55, W, H * 0.45);
+
+  // Floor perspective lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 1;
+  for (let x = 0; x <= W; x += 110) {
+    ctx.beginPath();
+    ctx.moveTo(x, H * 0.58);
+    ctx.lineTo(x + 20, H);
+    ctx.stroke();
+  }
+
+  // Upper mezzanine beam
+  ctx.fillStyle = '#3a3f48';
+  ctx.fillRect(0, H * 0.08, W, 18);
+
+  // Mezzanine platform
+  ctx.fillStyle = '#3a3f4a';
+  ctx.fillRect(0, H * 0.14, W, H * 0.13);
+  ctx.fillStyle = '#30343c';
+  ctx.fillRect(0, H * 0.265, W, 14);
+
+  // Yellow guard rail on mezzanine
+  ctx.strokeStyle = '#f0b020';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(0, H * 0.17); ctx.lineTo(W, H * 0.17);
+  ctx.stroke();
+  // Rail posts
+  ctx.lineWidth = 4;
+  for (let x = 60; x < W; x += 120) {
+    ctx.beginPath();
+    ctx.moveTo(x, H * 0.14); ctx.lineTo(x, H * 0.27);
+    ctx.stroke();
+  }
+
+  // Structural pillars
+  const pillarPositions = [80, 350, 680];
+  pillarPositions.forEach(px => {
+    ctx.fillStyle = '#505560';
+    ctx.fillRect(px - 20, H * 0.27, 40, H * 0.31);
+    ctx.fillStyle = '#404550';
+    ctx.fillRect(px - 22, H * 0.27, 5, H * 0.31);
+    ctx.fillStyle = '#606570';
+    ctx.fillRect(px + 16, H * 0.27, 4, H * 0.31);
+  });
+
+  // High windows
+  const winY = H * 0.095;
+  [120, 310, 540, 730].forEach(wx => {
+    // Window frame
+    ctx.fillStyle = '#2a2e35';
+    ctx.fillRect(wx - 2, winY - 2, 104, 74);
+    // Sky
+    const skyGrad = ctx.createLinearGradient(wx, winY, wx, winY + 70);
+    skyGrad.addColorStop(0, '#85b8e8');
+    skyGrad.addColorStop(1, '#a8d0f0');
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(wx, winY, 100, 70);
+    // Window grid
+    ctx.strokeStyle = '#2a2e35';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(wx + 50, winY); ctx.lineTo(wx + 50, winY + 70);
+    ctx.moveTo(wx, winY + 35); ctx.lineTo(wx + 100, winY + 35);
+    ctx.stroke();
+    // Reflection shimmer
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillRect(wx + 4, winY + 4, 18, 60);
+  });
+
+  // Ceiling lights
+  [200, 460, 730].forEach(lx => {
+    ctx.fillStyle = '#2a2e35';
+    ctx.fillRect(lx - 18, H * 0.27, 36, 10);
+    // light cone
+    const lgGrad = ctx.createRadialGradient(lx, H * 0.29, 2, lx, H * 0.38, 70);
+    lgGrad.addColorStop(0, 'rgba(255,245,220,0.25)');
+    lgGrad.addColorStop(1, 'rgba(255,245,220,0)');
+    ctx.fillStyle = lgGrad;
+    ctx.fillRect(lx - 70, H * 0.28, 140, 120);
+    // Bright light dot
+    ctx.fillStyle = '#fffbe0';
+    ctx.fillRect(lx - 14, H * 0.27, 28, 8);
+  });
+
+  // Yellow safety equipment on left wall (pipes / gas cylinders)
+  ctx.fillStyle = '#e8a015';
+  ctx.fillRect(20, H * 0.32, 15, 60);
+  ctx.fillRect(42, H * 0.35, 12, 55);
+  ctx.fillStyle = '#555';
+  ctx.fillRect(18, H * 0.29, 20, 8);
+  ctx.fillRect(40, H * 0.32, 16, 8);
+
+  // Floor safety stripes
+  const stripeY = H - 40;
+  const stripeH = 22;
+  for (let x = 0; x < W; x += 44) {
+    ctx.fillStyle = (Math.floor(x / 22) % 2 === 0) ? '#f0b020' : '#1a1c22';
+    ctx.fillRect(x, stripeY, 22, stripeH);
+  }
+
+  // Left side door opening
+  ctx.fillStyle = '#5a6070';
+  ctx.fillRect(0, H * 0.32, 18, H * 0.35);
+
+  // Shadow on floor under car area
+  const shadowGrad = ctx.createRadialGradient(450, H - 30, 10, 450, H - 30, 280);
+  shadowGrad.addColorStop(0, 'rgba(0,0,0,0.18)');
+  shadowGrad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = shadowGrad;
+  ctx.fillRect(0, H * 0.58, W, H * 0.42);
+}
+
+// ── DRAW BARRIER ─────────────────────────────────────────────────
+function drawBarrier(shakeAmt) {
+  const bx = BARRIER_X + (Math.random() * shakeAmt * 2 - shakeAmt);
+  const by = (Math.random() * shakeAmt - shakeAmt * 0.5);
+  const bw = 120, bh = 230;
+  const barrierTop = CAR_Y - bh + 30;
+
+  ctx.save();
+  ctx.translate(bx, by);
+
+  // Barrier body - steel plates
+  const steelGrad = ctx.createLinearGradient(BARRIER_X, 0, BARRIER_X + bw, 0);
+  steelGrad.addColorStop(0, '#909095');
+  steelGrad.addColorStop(0.3, '#c8cace');
+  steelGrad.addColorStop(0.7, '#b0b5ba');
+  steelGrad.addColorStop(1, '#808590');
+  ctx.fillStyle = steelGrad;
+  ctx.fillRect(BARRIER_X, barrierTop, bw, bh);
+
+  // Bolt holes / rivets
+  ctx.fillStyle = '#606870';
+  [[8,8],[8,bh-8],[bw-8,8],[bw-8,bh-8],[bw/2,bh/2]].forEach(([rx,ry]) => {
+    ctx.beginPath();
+    ctx.arc(BARRIER_X + rx, barrierTop + ry, 4, 0, Math.PI*2);
+    ctx.fill();
+  });
+
+  // Checkerboard (yellow / dark)
+  const squareSize = 38;
+  const cols = 3, rows = 4;
+  const cbX = BARRIER_X + 12;
+  const cbY = barrierTop + 30;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      ctx.fillStyle = ((r + c) % 2 === 0) ? '#f0b020' : '#1a1c22';
+      ctx.fillRect(cbX + c * squareSize, cbY + r * squareSize, squareSize, squareSize);
+    }
+  }
+
+  // Plate borders
+  ctx.strokeStyle = '#606870';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(BARRIER_X + 1, barrierTop + 1, bw - 2, bh - 2);
+
+  // Shadow
+  const shadowG = ctx.createLinearGradient(BARRIER_X - 40, 0, BARRIER_X, 0);
+  shadowG.addColorStop(0, 'rgba(0,0,0,0)');
+  shadowG.addColorStop(1, 'rgba(0,0,0,0.3)');
+  ctx.fillStyle = shadowG;
+  ctx.fillRect(BARRIER_X - 40, barrierTop, 40, bh);
+
+  ctx.restore();
+}
+
+// ── DRAW CAR BODY ────────────────────────────────────────────────
+function drawCar(frontX, crushAmt) {
+  // frontX = x position of car's front face
+  const backX  = frontX - CAR_W + crushAmt * 80;
+  const roofY  = CAR_Y - CAR_H;
+  const floorY = CAR_Y;
+
+  // --- Drop shadow on floor ---
+  const sGrad = ctx.createLinearGradient(backX, floorY + 5, frontX, floorY + 5);
+  sGrad.addColorStop(0, 'rgba(0,0,0,0)');
+  sGrad.addColorStop(0.3, 'rgba(0,0,0,0.28)');
+  sGrad.addColorStop(0.7, 'rgba(0,0,0,0.28)');
+  sGrad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = sGrad;
+  ctx.fillRect(backX + 40, floorY + 2, CAR_W - 80, 18);
+
+  // --- Car body base ---
+  const bodyGrad = ctx.createLinearGradient(0, roofY, 0, floorY);
+  bodyGrad.addColorStop(0, '#d8dae0');
+  bodyGrad.addColorStop(0.4, '#f0f2f5');
+  bodyGrad.addColorStop(0.75, '#d0d3d8');
+  bodyGrad.addColorStop(1, '#a8aab0');
+  ctx.fillStyle = bodyGrad;
+
+  // Main body shape
+  ctx.beginPath();
+  // Rear hatch bottom
+  ctx.moveTo(backX + 30, floorY - 20);
+  // Rear undercarriage
+  ctx.lineTo(backX + 10, floorY - 18);
+  // Rear bumper
+  ctx.lineTo(backX + 4, floorY - 12);
+  ctx.lineTo(backX, floorY - 8);
+  // Front of car — crumple zone modulated by crushAmt
+  const crumpleX = frontX - crushAmt * 70;
+  ctx.lineTo(frontX - 2, floorY - 8);
+  ctx.lineTo(frontX, floorY - 15);
+  // Front upper
+  if (crushAmt < 0.05) {
+    ctx.lineTo(frontX, roofY + 100);
+    ctx.lineTo(frontX - 10, roofY + 80);
+  } else {
+    // crumpled front
+    ctx.lineTo(crumpleX + 10, floorY - 30);
+    ctx.lineTo(crumpleX - 8, floorY - 60);
+    ctx.lineTo(crumpleX + 5, floorY - 90);
+    ctx.lineTo(crumpleX - 12, roofY + 80);
+  }
+  // Hood
+  const hoodX = backX + CAR_W * 0.45 - crushAmt * 50;
+  ctx.lineTo(hoodX, roofY + 60);
+  // Windshield base
+  ctx.lineTo(backX + CAR_W * 0.35, roofY + 25);
+  // Roof front
+  ctx.lineTo(backX + CAR_W * 0.28, roofY + 8);
+  // Roof
+  ctx.lineTo(backX + 80, roofY + 5);
+  // Rear roof slope
+  ctx.lineTo(backX + 30, roofY + 35);
+  // Rear window / hatch
+  ctx.lineTo(backX + 10, floorY - 25);
+  ctx.closePath();
+  ctx.fill();
+
+  // Body side highlight
+  const hlGrad = ctx.createLinearGradient(0, roofY + 30, 0, roofY + 80);
+  hlGrad.addColorStop(0, 'rgba(255,255,255,0.5)');
+  hlGrad.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = hlGrad;
+  ctx.fillRect(backX + 20, roofY + 30, CAR_W - 40, 50);
+
+  // --- Windows ---
+  ctx.fillStyle = 'rgba(140, 175, 210, 0.75)';
+  // Rear window
+  ctx.beginPath();
+  ctx.moveTo(backX + 22, floorY - 26);
+  ctx.lineTo(backX + 36, roofY + 36);
+  ctx.lineTo(backX + 78, roofY + 10);
+  ctx.lineTo(backX + 80, floorY - 35);
+  ctx.closePath();
+  ctx.fill();
+
+  // Middle + front windows
+  ctx.beginPath();
+  ctx.moveTo(backX + 90, floorY - 35);
+  ctx.lineTo(backX + 88, roofY + 12);
+  ctx.lineTo(backX + CAR_W * 0.34, roofY + 12);
+  ctx.lineTo(backX + CAR_W * 0.36, roofY + 30);
+  ctx.lineTo(backX + CAR_W * 0.36, floorY - 38);
+  ctx.closePath();
+  ctx.fill();
+  // Windshield
+  ctx.beginPath();
+  ctx.moveTo(backX + CAR_W * 0.35 + 8, floorY - 38);
+  ctx.lineTo(backX + CAR_W * 0.36 + 2, roofY + 30);
+  ctx.lineTo(hoodX - 12, roofY + 65);
+  ctx.lineTo(hoodX - 5, floorY - 48);
+  ctx.closePath();
+  ctx.fill();
+
+  // Window glare
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  ctx.beginPath();
+  ctx.moveTo(backX + 100, floorY - 40);
+  ctx.lineTo(backX + 98, roofY + 20);
+  ctx.lineTo(backX + 120, roofY + 18);
+  ctx.lineTo(backX + 122, floorY - 42);
+  ctx.closePath();
+  ctx.fill();
+
+  // --- Door lines ---
+  ctx.strokeStyle = 'rgba(90,95,105,0.5)';
+  ctx.lineWidth = 1.5;
+  // Door 1
+  ctx.beginPath();
+  ctx.moveTo(backX + 90, floorY - 18);
+  ctx.lineTo(backX + 90, floorY - 38);
+  ctx.stroke();
+  // Door 2
+  ctx.beginPath();
+  ctx.moveTo(backX + CAR_W * 0.36, floorY - 18);
+  ctx.lineTo(backX + CAR_W * 0.36, floorY - 40);
+  ctx.stroke();
+
+  // --- Door handles ---
+  ctx.fillStyle = '#a0a8b0';
+  ctx.fillRect(backX + 55, floorY - 38, 18, 5);
+  ctx.fillRect(backX + CAR_W * 0.22, floorY - 40, 18, 5);
+  ctx.fillRect(backX + CAR_W * 0.41, floorY - 42, 18, 5);
+
+  // --- Wheels ---
+  drawWheel(backX + 75, floorY);
+  drawWheel(frontX - 95, floorY);
+
+  // --- Crash test markers ---
+  // Horizontal yellow/black stripe
+  const stripeY2 = floorY - 32;
+  for (let mx = backX + 20; mx < frontX - 80; mx += 16) {
+    ctx.fillStyle = (Math.floor((mx - backX) / 8) % 2 === 0) ? '#f0b020' : '#1a1c22';
+    ctx.fillRect(mx, stripeY2, 8, 6);
+  }
+  // Circular targets
+  const targets = [
+    backX + CAR_W * 0.18,
+    backX + CAR_W * 0.42,
+    backX + CAR_W * 0.62,
+  ];
+  targets.forEach(tx => {
+    const ty = floorY - 50;
+    // outer yellow
+    ctx.fillStyle = '#f0b020';
+    ctx.beginPath(); ctx.arc(tx, ty, 16, 0, Math.PI*2); ctx.fill();
+    // inner black
+    ctx.fillStyle = '#1a1c22';
+    ctx.beginPath(); ctx.arc(tx, ty, 10, 0, Math.PI*2); ctx.fill();
+    // center dot
+    ctx.fillStyle = '#f0b020';
+    ctx.beginPath(); ctx.arc(tx, ty, 4, 0, Math.PI*2); ctx.fill();
+  });
+
+  // --- Front lights (undamaged) ---
+  if (crushAmt < 0.3) {
+    ctx.fillStyle = `rgba(255,255,200,${0.7 - crushAmt * 2})`;
+    ctx.beginPath();
+    ctx.ellipse(frontX - 18, roofY + 82, 10, 5, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = `rgba(255,80,80,${0.5 - crushAmt})`;
+    ctx.beginPath();
+    ctx.ellipse(backX + 18, roofY + 82, 9, 4, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  // --- Crumple zone visualization ---
+  if (crushAmt > 0.05) {
+    const cx2 = frontX - crushAmt * 70;
+    ctx.strokeStyle = 'rgba(100,80,60,0.6)';
+    ctx.lineWidth = 1.5;
+    for (let ci = 0; ci < 8; ci++) {
+      const ly = floorY - 10 - ci * 15;
+      ctx.beginPath();
+      ctx.moveTo(cx2 - 5 + Math.sin(ci * 1.3) * 8, ly);
+      ctx.lineTo(frontX - 2, ly);
+      ctx.stroke();
+    }
+    // darkened crumple area
+    const crumpleGrad = ctx.createLinearGradient(cx2 - 20, 0, frontX, 0);
+    crumpleGrad.addColorStop(0, 'rgba(0,0,0,0)');
+    crumpleGrad.addColorStop(0.5, 'rgba(60,40,20,0.35)');
+    crumpleGrad.addColorStop(1, 'rgba(80,50,20,0.5)');
+    ctx.fillStyle = crumpleGrad;
+    ctx.fillRect(cx2 - 20, floorY - CAR_H + 70, frontX - cx2 + 20, CAR_H - 70);
+  }
+}
+
+function drawWheel(cx, floorY) {
+  const wr = 38, wr2 = 22;
+  // Tire shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.beginPath(); ctx.ellipse(cx, floorY + 4, wr, 8, 0, 0, Math.PI*2); ctx.fill();
+
+  // Tire
+  ctx.fillStyle = '#1c1e22';
+  ctx.beginPath(); ctx.arc(cx, floorY - wr + 5, wr, 0, Math.PI*2); ctx.fill();
+
+  // Tire tread highlight
+  ctx.strokeStyle = '#2a2e35';
+  ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(cx, floorY - wr + 5, wr - 4, 0, Math.PI*2); ctx.stroke();
+
+  // Rim
+  const rimGrad = ctx.createRadialGradient(cx - 5, floorY - wr, 3, cx, floorY - wr + 5, wr2);
+  rimGrad.addColorStop(0, '#d8dce4');
+  rimGrad.addColorStop(0.5, '#a0a8b4');
+  rimGrad.addColorStop(1, '#707888');
+  ctx.fillStyle = rimGrad;
+  ctx.beginPath(); ctx.arc(cx, floorY - wr + 5, wr2, 0, Math.PI*2); ctx.fill();
+
+  // Rim spokes
+  ctx.strokeStyle = '#606878';
+  ctx.lineWidth = 3;
+  for (let a = 0; a < Math.PI * 2; a += Math.PI / 3) {
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * 8, (floorY - wr + 5) + Math.sin(a) * 8);
+    ctx.lineTo(cx + Math.cos(a) * (wr2 - 4), (floorY - wr + 5) + Math.sin(a) * (wr2 - 4));
+    ctx.stroke();
+  }
+  // Hub cap
+  ctx.fillStyle = '#c0c4cc';
+  ctx.beginPath(); ctx.arc(cx, floorY - wr + 5, 8, 0, Math.PI*2); ctx.fill();
+}
+
+// ── SOUND WAVE RINGS ─────────────────────────────────────────────
+function drawSoundWaves(ix, iy, t, alpha) {
+  const rings = 4;
+  for (let r = 0; r < rings; r++) {
+    const phase = ((t * 2.5 + r * 0.3) % 1);
+    const radius = phase * 120 + 10;
+    const a = (1 - phase) * alpha * 0.6;
+    ctx.save();
+    ctx.strokeStyle = `rgba(255,200,100,${a})`;
+    ctx.lineWidth = 2 - phase * 1.5;
+    ctx.beginPath();
+    ctx.arc(ix, iy, radius, -Math.PI * 0.6, Math.PI * 0.6);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// ── HEAT GLOW ────────────────────────────────────────────────────
+function drawHeatGlow(ix, iy, intensity) {
+  // Subtle radial heat glow at contact point
+  const glowGrad = ctx.createRadialGradient(ix, iy, 0, ix, iy, 90);
+  glowGrad.addColorStop(0, `rgba(255,180,60,${intensity * 0.55})`);
+  glowGrad.addColorStop(0.3, `rgba(255,120,30,${intensity * 0.35})`);
+  glowGrad.addColorStop(0.65, `rgba(200,60,0,${intensity * 0.15})`);
+  glowGrad.addColorStop(1, 'rgba(180,40,0,0)');
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  ctx.fillStyle = glowGrad;
+  ctx.beginPath();
+  ctx.arc(ix, iy, 90, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// ── VIBRATION LINES ──────────────────────────────────────────────
+function drawVibrationLines(ix, iy, t, alpha) {
+  ctx.save();
+  ctx.strokeStyle = `rgba(255,210,120,${alpha * 0.45})`;
+  ctx.lineWidth = 1.5;
+  for (let v = 0; v < 5; v++) {
+    const amp = 6 + v * 3;
+    const yOff = (v - 2) * 22;
+    ctx.beginPath();
+    const startX = ix - 55;
+    const endX   = ix + 15;
+    ctx.moveTo(startX, iy + yOff);
+    for (let px = startX; px <= endX; px += 4) {
+      const wave = Math.sin((px - startX) / 8 + t * 25) * amp;
+      ctx.lineTo(px, iy + yOff + wave);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ── LABEL OVERLAYS ───────────────────────────────────────────────
+function drawLabels(phase, impactAlpha) {
+  if (phase === 'impact' || phase === 'hold') {
+    const a = Math.min(1, impactAlpha * 1.5);
+    ctx.save();
+    ctx.font = 'bold 13px Georgia';
+    ctx.textAlign = 'left';
+
+    const labels = [
+      { x: BARRIER_X - 160, y: CAR_Y - 200, color: '#ffb040', text: '🔆  Heat Energy' },
+      { x: BARRIER_X - 195, y: CAR_Y - 140, color: '#80ccff', text: '〜  Sound Waves' },
+      { x: BARRIER_X - 170, y: CAR_Y - 80,  color: '#a0e080', text: '〰  Vibration' },
+    ];
+
+    labels.forEach(l => {
+      ctx.fillStyle = `rgba(0,0,0,${a * 0.6})`;
+      ctx.fillRect(l.x - 6, l.y - 15, ctx.measureText(l.text).width + 14, 22);
+      ctx.fillStyle = l.color.replace(')', `,${a})`).replace('rgb', 'rgba');
+      // Draw with alpha via globalAlpha
+      ctx.globalAlpha = a;
+      ctx.fillStyle = l.color;
+      ctx.fillText(l.text, l.x, l.y);
+    });
+    ctx.restore();
+  }
+}
+
+// ── MAIN ANIMATION LOOP ──────────────────────────────────────────
+function getState(elapsed) {
+  if (elapsed < T_IDLE) {
+    return { phase: 'idle', carFrontX: CAR_START_X, crush: 0, shake: 0, impactAlpha: 0, soundT: 0 };
+  }
+  if (elapsed < T_IDLE + T_DRIVE) {
+    const t = (elapsed - T_IDLE) / T_DRIVE;
+    const ease = easeIn(t);
+    const frontX = lerp(CAR_START_X, CAR_STOP_X, ease);
+    return { phase: 'drive', carFrontX: frontX, crush: 0, shake: 0, impactAlpha: 0, soundT: 0 };
+  }
+  if (elapsed < T_IDLE + T_DRIVE + T_IMPACT) {
+    const t = (elapsed - T_IDLE - T_DRIVE) / T_IMPACT;
+    const crush = easeOut(t) * 0.45;
+    return { phase: 'impact', carFrontX: CAR_STOP_X, crush, shake: (1 - t) * 6, impactAlpha: 1, soundT: t };
+  }
+  // hold phase
+  const t = (elapsed - T_IDLE - T_DRIVE - T_IMPACT) / T_HOLD;
+  const decay = Math.max(0, 1 - t * 1.5);
+  return {
+    phase: 'hold',
+    carFrontX: CAR_STOP_X,
+    crush: 0.45,
+    shake: decay * 1.5 * Math.sin(t * 40),
+    impactAlpha: decay,
+    soundT: t * 3
+  };
+}
+
+function draw(timestamp) {
+  if (!startTime) startTime = timestamp;
+  const elapsed = (timestamp - startTime) / 1000;
+
+  ctx.clearRect(0, 0, W, H);
+  drawLab();
+
+  const s = getState(elapsed);
+
+  // Play sound at impact
+  if (s.phase === 'impact' && !soundPlayed) playImpactSound();
+
+  // Impact effects
+  const ix = BARRIER_X;
+  const iy = CAR_Y - CAR_H * 0.55;
+
+  if (s.impactAlpha > 0) {
+    drawHeatGlow(ix, iy, s.impactAlpha);
+    drawSoundWaves(ix, iy, s.soundT, s.impactAlpha);
+    drawVibrationLines(ix, iy, s.soundT, s.impactAlpha);
+  }
+
+  // Update & draw particles
+  if (s.phase === 'impact') {
+    if (Math.random() < 0.65) spawnParticles(ix - 10, CAR_Y - 20, 2);
+  }
+  updateParticles();
+  drawParticles();
+
+  drawBarrier(s.shake);
+  drawCar(s.carFrontX, s.crush);
+  drawLabels(s.phase, s.impactAlpha);
+
+  // Frame counter HUD
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(W - 130, H - 28, 128, 26);
+  ctx.fillStyle = '#aaa';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'right';
+  const phaseName = { idle:'Standby', drive:'Moving →', impact:'IMPACT!', hold:'Post-Impact' }[s.phase] || '';
+  ctx.fillStyle = s.phase === 'impact' ? '#ff8040' : '#aaa';
+  ctx.fillText(phaseName, W - 6, H - 10);
+  ctx.restore();
+
+  if (elapsed < T_TOTAL) {
+    animId = requestAnimationFrame(draw);
+  } else {
+    drawEndFrame();
+  }
+}
+
+function drawEndFrame() {
+  // Final hold showing full damage + faded labels
+  ctx.clearRect(0, 0, W, H);
+  drawLab();
+  drawBarrier(0);
+  drawCar(CAR_STOP_X, 0.45);
+
+  // Gentle reminder labels
+  ctx.save();
+  ctx.font = 'bold 14px Georgia';
+  ctx.textAlign = 'center';
+  const labels2 = [
+    { x: BARRIER_X - 100, y: CAR_Y - 210, color: '#ffb040', text: '🔆 Heat' },
+    { x: BARRIER_X - 100, y: CAR_Y - 165, color: '#80ccff', text: '〜 Sound' },
+    { x: BARRIER_X - 100, y: CAR_Y - 120, color: '#a0e080', text: '〰 Vibration' },
+  ];
+  labels2.forEach(l => {
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(l.x - 56, l.y - 16, 112, 22);
+    ctx.fillStyle = l.color;
+    ctx.fillText(l.text, l.x, l.y);
+  });
+
+  // Banner
+  ctx.fillStyle = 'rgba(0,0,0,0.72)';
+  ctx.fillRect(0, H * 0.42, W, 62);
+  ctx.fillStyle = '#f0c040';
+  ctx.font = 'bold 20px Georgia';
+  ctx.fillText('Where did the kinetic energy go?', W / 2, H * 0.42 + 28);
+  ctx.fillStyle = '#e0e0e0';
+  ctx.font = '14px Georgia';
+  ctx.fillText('→ Heat at the impact zone  ·  Sound waves through the air  ·  Vibration through the barrier', W / 2, H * 0.42 + 50);
+  ctx.restore();
+}
+
+function restart() {
+  if (animId) cancelAnimationFrame(animId);
+  startTime   = null;
+  soundPlayed = false;
+  particles.length = 0;
+  animId = requestAnimationFrame(draw);
+}
+
+// Auto-start on first user interaction (for audio policy)
+canvas.addEventListener('click', () => { if (!startTime) restart(); }, { once: true });
+restart();
+</script>
+</body>
+</html>
